@@ -1,0 +1,134 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && request.auth.token.admin == true;
+    }
+
+    function isRideParticipant(rideId) {
+      return isAuthenticated() && (
+        isAdmin() ||
+        (
+          exists(/databases/$(database)/documents/rides/$(rideId)) && (
+            get(/databases/$(database)/documents/rides/$(rideId)).data.driverId == request.auth.uid ||
+            get(/databases/$(database)/documents/rides/$(rideId)).data.creatorId == request.auth.uid ||
+            ('passengerId' in get(/databases/$(database)/documents/rides/$(rideId)).data && get(/databases/$(database)/documents/rides/$(rideId)).data.passengerId == request.auth.uid) ||
+            ('userId' in get(/databases/$(database)/documents/rides/$(rideId)).data && get(/databases/$(database)/documents/rides/$(rideId)).data.userId == request.auth.uid) ||
+            ('passengerIds' in get(/databases/$(database)/documents/rides/$(rideId)).data && request.auth.uid in get(/databases/$(database)/documents/rides/$(rideId)).data.passengerIds)
+          )
+        )
+      );
+    }
+
+    match /drivers/{driverId} {
+      allow read: if isOwner(driverId) || isAdmin();
+
+      allow create: if isOwner(driverId)
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.verificationStatus == 'pending'
+                    && request.resource.data.selfieUrl is string
+                    && request.resource.data.licenseFrontUrl is string
+                    && request.resource.data.licenseBackUrl is string
+                    && request.resource.data.insuranceUrl is string
+                    && request.resource.data.revenuePermitUrl is string;
+
+      allow update: if isAdmin()
+                    || (
+                      isOwner(driverId)
+                      && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status', 'verificationStatus', 'rejectionReason'])
+                    );
+
+      allow delete: if isAdmin();
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) || isAdmin();
+      allow update: if isOwner(userId) || isAdmin();
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    match /rides/{rideId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated();
+      allow delete: if isAdmin();
+
+      match /joinedPassengers/{passengerDocId} {
+        allow read: if isAuthenticated();
+        allow create, update: if isAuthenticated();
+        allow delete: if isAuthenticated();
+      }
+    }
+
+    match /rideRequests/{requestId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated();
+      allow delete: if isAuthenticated();
+    }
+
+    match /rideChats/{rideId} {
+      allow read, write: if isAuthenticated() && isRideParticipant(rideId);
+
+      match /messages/{messageId} {
+        allow read: if isAuthenticated() && isRideParticipant(rideId);
+        allow create: if isAuthenticated()
+                      && isRideParticipant(rideId)
+                      && request.resource.data.senderId == request.auth.uid;
+        allow update, delete: if isAdmin();
+      }
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid ||
+        resource.data.recipientId == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid ||
+        resource.data.recipientId == request.auth.uid ||
+        isAdmin()
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /complaints/{complaintId} {
+      // Driver and Passenger can read their own complaints; Admin can read all
+      allow read: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid ||
+        (resource.data.driverId != null && resource.data.driverId == request.auth.uid) ||
+        isAdmin()
+      );
+
+      // Authenticated users can create complaint for themselves with status 'new'
+      allow create: if isAuthenticated()
+                    && (request.resource.data.userId == request.auth.uid || request.resource.data.driverId == request.auth.uid)
+                    && request.resource.data.status == 'new'
+                    && (!('adminResponse' in request.resource.data) || request.resource.data.adminResponse == null)
+                    && (!('resolvedAt' in request.resource.data) || request.resource.data.resolvedAt == null);
+
+      // Only Admin can update complaint status, adminResponse, resolvedAt
+      allow update: if isAdmin();
+
+      // Only Admin can delete complaints
+      allow delete: if isAdmin();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
